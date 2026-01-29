@@ -1,6 +1,6 @@
 <script lang="ts">
 	import * as Card from '$lib/components/ui/card';
-	import { FolderOpen } from 'lucide-svelte';
+	import { FolderOpen, Layers } from 'lucide-svelte';
 
 	const features = [
 		{
@@ -8,6 +8,12 @@
 			description: '按指定列将 Excel 数据分类到不同的 Sheet',
 			icon: FolderOpen,
 			href: '/classify'
+		},
+		{
+			title: '批量分类归档',
+			description: '批量处理多个 Excel 文件，统一分类归档',
+			icon: Layers,
+			href: '/classify-batch'
 		}
 	];
 </script>

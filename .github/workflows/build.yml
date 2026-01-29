@@ -90,7 +90,6 @@ jobs:
           name: 娟娟工具箱-${{ matrix.name }}
           path: |
             src-tauri/target/*/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
 
   release:
