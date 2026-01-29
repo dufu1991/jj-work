@@ -1,7 +1,7 @@
 {
 	"name": "jj-work",
 	"private": true,
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
@@ -35,6 +35,7 @@
 		"bits-ui": "^2.15.4",
 		"clsx": "^2.1.1",
 		"file-saver": "^2.0.5",
+		"jszip": "^3.10.1",
 		"lucide-svelte": "^0.563.0",
 		"tailwind-merge": "^3.4.0",
 		"tailwind-variants": "^3.2.2",

@@ -1,18 +1,22 @@
 <script lang="ts">
 	import * as XLSX from 'xlsx';
-	import { open } from '@tauri-apps/plugin-dialog';
+	import JSZip from 'jszip';
+	import { open, save } from '@tauri-apps/plugin-dialog';
 	import { writeFile, readFile } from '@tauri-apps/plugin-fs';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import {
 		ChevronLeft,
-		X,
 		FileSpreadsheet,
 		FolderUp,
 		CheckCircle,
 		Loader2,
-		Trash2
+		Trash2,
+		Settings2,
+		List,
+		FolderOutput,
+		FileArchive
 	} from 'lucide-svelte';
 
 	interface FileItem {
@@ -35,12 +39,44 @@
 	let suffix = $state('_分类');
 	let outputDir = $state('');
 
+	let unifiedMode = $state(true);
+	let unifiedColumn = $state('');
+	let unifiedHeaderRows = $state(1);
+	let outputMode = $state<'folder' | 'zip'>('folder');
+
+	const commonColumns = $derived(() => {
+		if (files.length === 0) return [];
+		if (files.length === 1) return files[0].columns;
+		let common = [...files[0].columns];
+		for (let i = 1; i < files.length; i++) {
+			common = common.filter((col) => files[i].columns.includes(col));
+		}
+		return common;
+	});
+
+	$effect(() => {
+		if (unifiedMode && unifiedColumn) {
+			files.forEach((file, index) => {
+				if (file.columns.includes(unifiedColumn)) {
+					files[index].selectedColumn = unifiedColumn;
+				}
+			});
+		}
+	});
+
+	$effect(() => {
+		if (unifiedMode) {
+			files.forEach((_, index) => {
+				files[index].headerRows = unifiedHeaderRows;
+			});
+		}
+	});
+
 	async function openFileDialog() {
 		const selected = await open({
 			multiple: true,
 			filters: [{ name: 'Excel', extensions: ['xlsx', 'xls'] }]
 		});
-
 		if (selected && Array.isArray(selected)) {
 			for (const path of selected) {
 				if (!files.some((f) => f.path === path)) {
@@ -57,8 +93,8 @@
 			name,
 			size: 0,
 			columns: [],
-			selectedColumn: '',
-			headerRows: 1,
+			selectedColumn: unifiedMode ? unifiedColumn : '',
+			headerRows: unifiedMode ? unifiedHeaderRows : 1,
 			workbook: null,
 			sheetData: [],
 			status: 'pending',
@@ -70,10 +106,8 @@
 			const buffer = await readFile(path);
 			fileItem.size = buffer.length;
 			fileItem.workbook = XLSX.read(buffer, { type: 'array' });
-
 			const firstSheet = fileItem.workbook.Sheets[fileItem.workbook.SheetNames[0]];
 			fileItem.sheetData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as any[][];
-
 			if (fileItem.sheetData.length > 0) {
 				fileItem.columns = fileItem.sheetData[0]
 					.map((col: any, index: number) => ({
@@ -87,7 +121,6 @@
 			fileItem.error = '读取文件失败';
 			console.error(e);
 		}
-
 		files = [...files, fileItem];
 	}
 
@@ -104,10 +137,7 @@
 	}
 
 	async function selectOutputDir() {
-		const selected = await open({
-			directory: true,
-			multiple: false
-		});
+		const selected = await open({ directory: true, multiple: false });
 		if (selected && typeof selected === 'string') {
 			outputDir = selected;
 		}
@@ -115,100 +145,84 @@
 
 	function sanitizeSheetName(name: string): string {
 		let sanitized = name.replace(/[\\/*?[\]:]/g, '');
-		if (sanitized.length > 31) {
-			sanitized = sanitized.substring(0, 31);
-		}
-		if (!sanitized) {
-			sanitized = '未命名';
-		}
+		if (sanitized.length > 31) sanitized = sanitized.substring(0, 31);
+		if (!sanitized) sanitized = '未命名';
 		return sanitized;
 	}
 
 	async function processAllFiles() {
-		if (!outputDir) {
-			return;
-		}
-
 		processing = true;
+		const zip = outputMode === 'zip' ? new JSZip() : null;
 
 		for (let i = 0; i < files.length; i++) {
 			const file = files[i];
-			if (!file.workbook || !file.selectedColumn) continue;
+			const col = unifiedMode ? unifiedColumn : file.selectedColumn;
+			const hRows = unifiedMode ? unifiedHeaderRows : file.headerRows;
+
+			if (!file.workbook || !col) continue;
 
 			files[i].status = 'processing';
 			files[i].error = '';
 			files[i].result = [];
 
 			try {
-				const colIndex = file.columns.indexOf(file.selectedColumn);
-				if (colIndex === -1) {
+				const actualColIndex = file.sheetData[0].findIndex(
+					(c: any) => String(c || '') === col
+				);
+				if (actualColIndex === -1) {
 					files[i].error = '未找到选择的列';
 					files[i].status = 'error';
 					continue;
 				}
 
-				const actualColIndex = file.sheetData[0].findIndex(
-					(col: any) => String(col || '') === file.selectedColumn
-				);
-
 				const groups: Map<string, any[][]> = new Map();
-				const headerRowsData = file.sheetData.slice(0, file.headerRows);
+				const headerRowsData = file.sheetData.slice(0, hRows);
 
-				for (let j = file.headerRows; j < file.sheetData.length; j++) {
+				for (let j = hRows; j < file.sheetData.length; j++) {
 					const row = file.sheetData[j];
 					const key = row[actualColIndex];
-
-					if (key === undefined || key === null || key === '') {
-						continue;
-					}
-
+					if (key === undefined || key === null || key === '') continue;
 					const keyStr = String(key);
-					if (!groups.has(keyStr)) {
-						groups.set(keyStr, []);
-					}
+					if (!groups.has(keyStr)) groups.set(keyStr, []);
 					groups.get(keyStr)!.push(row);
 				}
 
 				const newWorkbook = XLSX.utils.book_new();
-
 				const originalSheet = file.workbook.Sheets[file.workbook.SheetNames[0]];
 				XLSX.utils.book_append_sheet(newWorkbook, originalSheet, '全部');
 
 				const originalMerges = originalSheet['!merges'] || [];
 				const headerMerges = originalMerges.filter(
-					(merge: XLSX.Range) => merge.s.r < file.headerRows && merge.e.r < file.headerRows
+					(merge: XLSX.Range) => merge.s.r < hRows && merge.e.r < hRows
 				);
 				const originalCols = originalSheet['!cols'] || [];
-
 				const resultItems: { name: string; count: number }[] = [];
 
 				groups.forEach((rows, name) => {
 					const sheetName = sanitizeSheetName(name);
 					const sheetDataWithHeader = [...headerRowsData, ...rows];
 					const newSheet = XLSX.utils.aoa_to_sheet(sheetDataWithHeader);
-
 					if (headerMerges.length > 0) {
 						newSheet['!merges'] = headerMerges.map((merge: XLSX.Range) => ({
 							s: { r: merge.s.r, c: merge.s.c },
 							e: { r: merge.e.r, c: merge.e.c }
 						}));
 					}
-
-					if (originalCols.length > 0) {
-						newSheet['!cols'] = [...originalCols];
-					}
-
+					if (originalCols.length > 0) newSheet['!cols'] = [...originalCols];
 					XLSX.utils.book_append_sheet(newWorkbook, newSheet, sheetName);
 					resultItems.push({ name: sheetName, count: rows.length });
 				});
 
 				const wbout = XLSX.write(newWorkbook, { bookType: 'xlsx', type: 'array' });
-
 				const originalName = file.name.replace(/\.[^/.]+$/, '');
 				const outputFileName = `${prefix}${originalName}${suffix}.xlsx`;
-				const outputPath = `${outputDir}/${outputFileName}`;
 
-				await writeFile(outputPath, new Uint8Array(wbout));
+				if (outputMode === 'zip' && zip) {
+					zip.file(outputFileName, new Uint8Array(wbout));
+				} else if (outputDir) {
+					const outputPath = `${outputDir}/${outputFileName}`;
+					await writeFile(outputPath, new Uint8Array(wbout));
+				}
 
 				files[i].result = resultItems.sort((a, b) => b.count - a.count);
 				files[i].status = 'done';
@@ -216,6 +230,17 @@
 				files[i].error = '处理文件时出错';
 				files[i].status = 'error';
 				console.error(e);
+			}
+		}
+
+		if (outputMode === 'zip' && zip) {
+			const zipContent = await zip.generateAsync({ type: 'uint8array' });
+			const zipPath = await save({
+				defaultPath: `批量分类结果${suffix}.zip`,
+				filters: [{ name: 'ZIP', extensions: ['zip'] }]
+			});
+			if (zipPath) {
+				await writeFile(zipPath, zipContent);
 			}
 		}
 
@@ -227,12 +252,17 @@
 		prefix = '';
 		suffix = '_分类';
 		outputDir = '';
+		unifiedColumn = '';
+		unifiedHeaderRows = 1;
+		outputMode = 'folder';
 	}
 
 	const canProcess = $derived(
 		files.length > 0 &&
-			files.every((f) => f.selectedColumn) &&
-			outputDir &&
+			(unifiedMode
+				? unifiedColumn && files.every((f) => f.columns.includes(unifiedColumn))
+				: files.every((f) => f.selectedColumn)) &&
+			(outputMode === 'zip' || outputDir) &&
 			!processing
 	);
 
@@ -264,6 +294,83 @@
 		</Card.Root>
 
 		{#if files.length > 0}
+			<Card.Root class="mb-6">
+				<Card.Header class="pb-4">
+					<div class="flex items-center justify-between">
+						<div>
+							<Card.Title class="text-base">分类设置</Card.Title>
+							<Card.Description>选择分类依据的列和表头行数</Card.Description>
+						</div>
+						<div class="flex rounded-md shadow-sm">
+							<button
+								class="px-3 py-1.5 text-xs border border-slate-200 rounded-l-md transition-colors flex items-center gap-1.5 {unifiedMode
+									? 'bg-primary text-primary-foreground border-primary'
+									: 'bg-white text-slate-600 hover:bg-slate-50'}"
+								onclick={() => (unifiedMode = true)}
+								disabled={processing}
+							>
+								<Settings2 class="w-3.5 h-3.5" />
+								统一设置
+							</button>
+							<button
+								class="px-3 py-1.5 text-xs border border-slate-200 rounded-r-md -ml-px transition-colors flex items-center gap-1.5 {!unifiedMode
+									? 'bg-primary text-primary-foreground border-primary'
+									: 'bg-white text-slate-600 hover:bg-slate-50'}"
+								onclick={() => (unifiedMode = false)}
+								disabled={processing}
+							>
+								<List class="w-3.5 h-3.5" />
+								单独设置
+							</button>
+						</div>
+					</div>
+				</Card.Header>
+
+				{#if unifiedMode}
+					<Card.Content class="pt-0 space-y-4">
+						{#if commonColumns().length > 0}
+							<div>
+								<p class="text-sm font-medium text-slate-700 mb-2">分类列（应用到所有文件）：</p>
+								<div class="flex flex-wrap gap-2">
+									{#each commonColumns() as col}
+										<button
+											class="px-3 py-1.5 text-sm rounded-full border transition-colors {unifiedColumn === col
+												? 'bg-primary text-primary-foreground border-primary'
+												: 'bg-white text-slate-600 border-slate-200 hover:border-primary/50'}"
+											onclick={() => (unifiedColumn = col)}
+											disabled={processing}
+										>
+											{col}
+										</button>
+									{/each}
+								</div>
+								{#if commonColumns().length < files[0]?.columns.length}
+									<p class="text-xs text-amber-600 mt-2">仅显示所有文件共有的列</p>
+								{/if}
+							</div>
+							<div>
+								<p class="text-sm font-medium text-slate-700 mb-2">表头行数（应用到所有文件）：</p>
+								<div class="inline-flex rounded-md shadow-sm">
+									{#each [1, 2, 3, 4, 5, 6] as num}
+										<button
+											class="px-3 py-1.5 text-sm border border-slate-200 transition-colors first:rounded-l-md last:rounded-r-md -ml-px first:ml-0 {unifiedHeaderRows === num
+												? 'bg-primary text-primary-foreground border-primary z-10'
+												: 'bg-white text-slate-600 hover:bg-slate-50'}"
+											onclick={() => (unifiedHeaderRows = num)}
+											disabled={processing}
+										>
+											{num}
+										</button>
+									{/each}
+								</div>
+							</div>
+						{:else}
+							<p class="text-sm text-slate-500">请先添加文件</p>
+						{/if}
+					</Card.Content>
+				{/if}
+			</Card.Root>
+
 			<div class="space-y-4 mb-6">
 				{#each files as file, index}
 					<Card.Root class={file.status === 'done' ? 'border-green-200 bg-green-50/50' : file.status === 'error' ? 'border-red-200 bg-red-50/50' : ''}>
@@ -282,7 +389,7 @@
 							</div>
 						</Card.Header>
 
-						{#if file.columns.length > 0 && file.status !== 'done'}
+						{#if file.columns.length > 0 && file.status !== 'done' && !unifiedMode}
 							<Card.Content class="pt-0 space-y-3">
 								<div>
 									<p class="text-xs font-medium text-slate-600 mb-2">分类列：</p>
@@ -300,7 +407,6 @@
 										{/each}
 									</div>
 								</div>
-
 								<div>
 									<p class="text-xs font-medium text-slate-600 mb-2">表头行数：</p>
 									<div class="inline-flex rounded-md shadow-sm">
@@ -317,6 +423,14 @@
 										{/each}
 									</div>
 								</div>
+							</Card.Content>
+						{/if}
+
+						{#if unifiedMode && file.status !== 'done'}
+							<Card.Content class="pt-0">
+								<p class="text-xs text-slate-500">
+									分类列：{unifiedColumn || '未选择'} | 表头行数：{unifiedHeaderRows}
+								</p>
 							</Card.Content>
 						{/if}
 
@@ -353,12 +467,40 @@
 				</Card.Header>
 				<Card.Content class="pt-0 space-y-4">
 					<div>
-						<p class="text-sm font-medium text-slate-700 mb-2">输出目录：</p>
-						<div class="flex gap-2">
-							<Input value={outputDir} placeholder="请选择输出目录" readonly class="flex-1" />
-							<Button variant="outline" onclick={selectOutputDir}>选择</Button>
+						<p class="text-sm font-medium text-slate-700 mb-2">输出方式：</p>
+						<div class="flex rounded-md shadow-sm">
+							<button
+								class="px-3 py-1.5 text-sm border border-slate-200 rounded-l-md transition-colors flex items-center gap-1.5 {outputMode === 'folder'
+									? 'bg-primary text-primary-foreground border-primary'
+									: 'bg-white text-slate-600 hover:bg-slate-50'}"
+								onclick={() => (outputMode = 'folder')}
+								disabled={processing}
+							>
+								<FolderOutput class="w-4 h-4" />
+								输出到文件夹
+							</button>
+							<button
+								class="px-3 py-1.5 text-sm border border-slate-200 rounded-r-md -ml-px transition-colors flex items-center gap-1.5 {outputMode === 'zip'
+									? 'bg-primary text-primary-foreground border-primary'
+									: 'bg-white text-slate-600 hover:bg-slate-50'}"
+								onclick={() => (outputMode = 'zip')}
+								disabled={processing}
+							>
+								<FileArchive class="w-4 h-4" />
+								打包为 ZIP
+							</button>
 						</div>
 					</div>
+
+					{#if outputMode === 'folder'}
+						<div>
+							<p class="text-sm font-medium text-slate-700 mb-2">输出目录：</p>
+							<div class="flex gap-2">
+								<Input value={outputDir} placeholder="请选择输出目录" readonly class="flex-1" />
+								<Button variant="outline" onclick={selectOutputDir}>选择</Button>
+							</div>
+						</div>
+					{/if}
 
 					<div class="grid grid-cols-2 gap-4">
 						<div>
@@ -370,7 +512,6 @@
 							<Input bind:value={suffix} placeholder="可选" />
 						</div>
 					</div>
-
 					{#if files.length > 0}
 						<p class="text-xs text-slate-400">
 							示例：{prefix}{files[0].name.replace(/\.[^/.]+$/, '')}{suffix}.xlsx
