@@ -31,9 +31,9 @@ jobs:
           OLD_VERSION=$(jq -r '.version' /tmp/old_package.json)
           echo "Current version: $CURRENT_VERSION"
           echo "Previous version: $OLD_VERSION"
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
           if [ "$CURRENT_VERSION" != "$OLD_VERSION" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
           else
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
@@ -96,12 +96,14 @@ jobs:
   release:
     needs: [check-version, build]
     runs-on: ubuntu-latest
-    if: needs.check-version.outputs.version_changed == 'true'
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
